@@ -117,10 +117,13 @@ if not cut_dates:
     st.stop()
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📊  Lending Impact",
     "⚠️   Credit Risk",
     "💳  Payment Volumes",
+    "📈  Yield Curve",
+    "🔥  Credit Spreads",
+    "🛡️  Portfolio Hedges",
 ])
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -320,6 +323,260 @@ with tab3:
             index="Cycle", columns="Series", values="Avg Change vs Prior 12mo"
         )
         st.dataframe(gdf, use_container_width=True)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 4 — Yield Curve
+# ══════════════════════════════════════════════════════════════════════════════
+with tab4:
+    st.subheader("How does the yield curve shift around Fed rate cuts?")
+    st.markdown(
+        "Treasury yields across maturities and the **2s10s spread** — "
+        "a key indicator of curve shape (inversion = negative). "
+        "Shaded windows = 12 months after each cycle start."
+    )
+
+    with st.spinner("Loading Treasury yield data…"):
+        dgs2  = fetch("DGS2")   # 2-Year Treasury
+        dgs10 = fetch("DGS10")  # 10-Year Treasury
+        dgs30 = fetch("DGS30")  # 30-Year Treasury
+
+    # 2s10s spread
+    spread_2s10s = (dgs10 - dgs2).dropna()
+
+    fig4 = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        subplot_titles=("Treasury Yields (%)", "2s10s Spread (bps)"),
+        row_heights=[0.6, 0.4],
+        vertical_spacing=0.1,
+    )
+
+    for label, series, color in [
+        ("2-Year (DGS2)",   dgs2,  "#58a6ff"),
+        ("10-Year (DGS10)", dgs10, "#3fb950"),
+        ("30-Year (DGS30)", dgs30, "#d2a8ff"),
+    ]:
+        if not series.empty:
+            fig4.add_trace(go.Scatter(
+                x=series.index, y=series.values,
+                name=label, line=dict(color=color, width=2),
+                hovertemplate="%{x|%b %Y}: %{y:.2f}%<extra>" + label + "</extra>",
+            ), row=1, col=1)
+
+    if not spread_2s10s.empty:
+        fig4.add_trace(go.Scatter(
+            x=spread_2s10s.index, y=spread_2s10s.values,
+            name="2s10s Spread", line=dict(color="#ffa657", width=2),
+            fill="tozeroy", fillcolor="rgba(255,166,87,0.08)",
+            hovertemplate="%{x|%b %Y}: %{y:.2f}%<extra>2s10s</extra>",
+        ), row=2, col=1)
+        # Zero line to highlight inversion
+        fig4.add_hline(y=0, line=dict(color="#ff7b72", width=1, dash="dot"), row=2, col=1)
+
+    add_cut_overlays(fig4, cut_dates, window_months=12, row=1, col=1, annotate=True)
+    add_cut_overlays(fig4, cut_dates, window_months=12, row=2, col=1, annotate=False)
+
+    fig4.update_layout(
+        **DARK_LAYOUT, height=620, hovermode="x unified",
+        legend=dict(bgcolor="rgba(0,0,0,0)", orientation="h", y=-0.08),
+    )
+    for r in [1, 2]:
+        fig4.update_xaxes(**AXIS_STYLE, row=r, col=1)
+        fig4.update_yaxes(**AXIS_STYLE, row=r, col=1)
+    fig4.update_yaxes(title_text="Yield (%)",       row=1, col=1)
+    fig4.update_yaxes(title_text="Spread (%)",      row=2, col=1)
+    st.plotly_chart(fig4, use_container_width=True)
+
+    # Curve snapshot table: yield levels at cycle start vs. 12mo later
+    snap_rows = []
+    for i, dt in enumerate(cut_dates):
+        cycle_label = f"Cycle {i+1}  ({dt.strftime('%b %Y')})"
+        end_dt = dt + pd.DateOffset(months=12)
+        for sname, series in [("2Y", dgs2), ("10Y", dgs10), ("30Y", dgs30), ("2s10s", spread_2s10s)]:
+            if series.empty:
+                continue
+            at_cut  = series.asof(dt)
+            at_12mo = series.asof(end_dt)
+            if not pd.isna(at_cut) and not pd.isna(at_12mo):
+                snap_rows.append({
+                    "Cycle": cycle_label,
+                    "Series": sname,
+                    "At Cut Start": f"{at_cut:.2f}%",
+                    "12mo Later": f"{at_12mo:.2f}%",
+                    "Change": f"{at_12mo - at_cut:+.2f}%",
+                })
+
+    if snap_rows:
+        st.markdown("##### Yield levels at cycle start vs. 12 months later")
+        snap_df = pd.DataFrame(snap_rows)
+        st.dataframe(snap_df.set_index(["Cycle", "Series"]), use_container_width=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 5 — Credit Spreads & Risk Appetite
+# ══════════════════════════════════════════════════════════════════════════════
+with tab5:
+    st.subheader("How does credit risk appetite respond to Fed cuts?")
+    st.markdown(
+        "High-yield and investment-grade OAS spreads signal risk appetite. "
+        "**Spread compression** post-cut = risk-on. VIX overlaid as a fear gauge."
+    )
+
+    with st.spinner("Loading credit spread data…"):
+        hy_spread = fetch("BAMLH0A0HYM2")   # HY OAS spread
+        ig_spread = fetch("BAMLC0A0CM")     # IG OAS spread
+        vix       = fetch("VIXCLS")         # VIX
+
+    fig5 = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        subplot_titles=("OAS Credit Spreads (bps)", "VIX — Equity Volatility"),
+        row_heights=[0.6, 0.4],
+        vertical_spacing=0.1,
+    )
+
+    for label, series, color in [
+        ("HY Spread — BAMLH0A0HYM2", hy_spread, "#ff7b72"),
+        ("IG Spread — BAMLC0A0CM",   ig_spread, "#58a6ff"),
+    ]:
+        if not series.empty:
+            fig5.add_trace(go.Scatter(
+                x=series.index, y=series.values,
+                name=label, line=dict(color=color, width=2),
+                hovertemplate="%{x|%b %Y}: %{y:.0f}bps<extra>" + label + "</extra>",
+            ), row=1, col=1)
+
+    if not vix.empty:
+        fig5.add_trace(go.Scatter(
+            x=vix.index, y=vix.values,
+            name="VIX", line=dict(color="#ffa657", width=2),
+            fill="tozeroy", fillcolor="rgba(255,166,87,0.06)",
+            hovertemplate="%{x|%b %Y}: %{y:.1f}<extra>VIX</extra>",
+        ), row=2, col=1)
+
+    add_cut_overlays(fig5, cut_dates, window_months=12, row=1, col=1, annotate=True)
+    add_cut_overlays(fig5, cut_dates, window_months=12, row=2, col=1, annotate=False)
+
+    fig5.update_layout(
+        **DARK_LAYOUT, height=620, hovermode="x unified",
+        legend=dict(bgcolor="rgba(0,0,0,0)", orientation="h", y=-0.08),
+    )
+    for r in [1, 2]:
+        fig5.update_xaxes(**AXIS_STYLE, row=r, col=1)
+        fig5.update_yaxes(**AXIS_STYLE, row=r, col=1)
+    fig5.update_yaxes(title_text="Spread (bps)", row=1, col=1)
+    fig5.update_yaxes(title_text="VIX",          row=2, col=1)
+    st.plotly_chart(fig5, use_container_width=True)
+
+    # Spread change table: level at cut start vs. 6mo and 12mo later
+    spread_rows = []
+    for i, dt in enumerate(cut_dates):
+        cycle_label = f"Cycle {i+1}  ({dt.strftime('%b %Y')})"
+        for sname, series in [("HY Spread", hy_spread), ("IG Spread", ig_spread), ("VIX", vix)]:
+            if series.empty:
+                continue
+            at_cut  = series.asof(dt)
+            at_6mo  = series.asof(dt + pd.DateOffset(months=6))
+            at_12mo = series.asof(dt + pd.DateOffset(months=12))
+            if pd.isna(at_cut):
+                continue
+            spread_rows.append({
+                "Cycle":    cycle_label,
+                "Series":   sname,
+                "At Cut":   f"{at_cut:.0f}",
+                "6mo":      f"{at_6mo:.0f}" if not pd.isna(at_6mo) else "n/a",
+                "12mo":     f"{at_12mo:.0f}" if not pd.isna(at_12mo) else "n/a",
+                "Δ 12mo":   f"{at_12mo - at_cut:+.0f}" if not pd.isna(at_12mo) else "n/a",
+            })
+
+    if spread_rows:
+        st.markdown("##### Spread / VIX levels at cut start, 6mo, and 12mo later")
+        st.dataframe(
+            pd.DataFrame(spread_rows).set_index(["Cycle", "Series"]),
+            use_container_width=True,
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 6 — Portfolio Hedges
+# ══════════════════════════════════════════════════════════════════════════════
+with tab6:
+    st.subheader("How do portfolio hedges perform around Fed cuts?")
+    st.markdown(
+        "Gold and the broad USD index — traditional portfolio hedges — "
+        "indexed to **100 at each cycle start** so cycles are directly comparable."
+    )
+
+    with st.spinner("Loading hedge asset data…"):
+        gold   = fetch("GOLDAMGBD228NLBM")  # Gold price USD/troy oz
+        dollar = fetch("DTWEXBGS")          # Trade-weighted USD index (broad)
+
+    fig6 = make_subplots(
+        rows=1, cols=2,
+        subplot_titles=("Gold — Indexed to 100 at Cut Start", "USD Index — Indexed to 100 at Cut Start"),
+        horizontal_spacing=0.08,
+    )
+
+    window_months = 18
+    for col_idx, (asset_name, series) in enumerate(
+        [("Gold (GOLDAMGBD228NLBM)", gold), ("USD Index (DTWEXBGS)", dollar)], start=1
+    ):
+        for i, dt in enumerate(cut_dates):
+            color = CYCLE_COLORS[i % len(CYCLE_COLORS)]
+            end_dt = dt + pd.DateOffset(months=window_months)
+            window = series[(series.index >= dt) & (series.index <= end_dt)]
+            base   = series.asof(dt)
+            if window.empty or pd.isna(base) or base == 0:
+                continue
+            indexed = (window / base * 100)
+            months_offset = ((window.index - dt) / pd.Timedelta(days=30.44)).round(1)
+            fig6.add_trace(go.Scatter(
+                x=months_offset, y=indexed.values,
+                name=f"Cycle {i+1} ({dt.strftime('%b %Y')})",
+                line=dict(color=color, width=2),
+                showlegend=(col_idx == 1),
+                hovertemplate="Month %{x}: %{y:.1f}<extra>Cycle " + str(i+1) + "</extra>",
+            ), row=1, col=col_idx)
+
+        # Baseline at 100
+        fig6.add_hline(y=100, line=dict(color="#8b949e", width=1, dash="dot"), row=1, col=col_idx)
+        fig6.update_xaxes(title_text="Months after cut", **AXIS_STYLE, row=1, col=col_idx)
+        fig6.update_yaxes(title_text="Indexed (100 = cut date)", **AXIS_STYLE, row=1, col=col_idx)
+
+    fig6.update_layout(
+        **DARK_LAYOUT, height=480, hovermode="x unified",
+        legend=dict(bgcolor="rgba(0,0,0,0)", orientation="h", y=-0.15),
+    )
+    st.plotly_chart(fig6, use_container_width=True)
+
+    # Peak/trough table for each asset per cycle
+    hedge_rows = []
+    for i, dt in enumerate(cut_dates):
+        cycle_label = f"Cycle {i+1}  ({dt.strftime('%b %Y')})"
+        end_dt = dt + pd.DateOffset(months=window_months)
+        for sname, series in [("Gold", gold), ("USD Index", dollar)]:
+            if series.empty:
+                continue
+            window = series[(series.index >= dt) & (series.index <= end_dt)]
+            base   = series.asof(dt)
+            if window.empty or pd.isna(base) or base == 0:
+                continue
+            indexed = window / base * 100
+            peak   = indexed.max()
+            trough = indexed.min()
+            final  = indexed.iloc[-1]
+            hedge_rows.append({
+                "Cycle":       cycle_label,
+                "Asset":       sname,
+                "Peak":        f"{peak:.1f}",
+                "Trough":      f"{trough:.1f}",
+                f"At {window_months}mo": f"{final:.1f}",
+            })
+
+    if hedge_rows:
+        st.markdown(f"##### Indexed performance over {window_months} months post-cut (base = 100)")
+        st.dataframe(
+            pd.DataFrame(hedge_rows).set_index(["Cycle", "Asset"]),
+            use_container_width=True,
+        )
 
 # ── Footer ────────────────────────────────────────────────────────────────────
 st.divider()
