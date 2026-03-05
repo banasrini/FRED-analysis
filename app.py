@@ -5,11 +5,17 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from fredapi import Fred
 from datetime import datetime
+import os
+import anthropic
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ── Config ────────────────────────────────────────────────────────────────────
-FRED_API_KEY = "e335584b268ae95e5d8725bf8c5f853d"
-START_DATE   = "1990-01-01"
-CYCLE_COLORS = ["#ff7b72", "#d2a8ff", "#79c0ff"]  # red / purple / blue
+FRED_API_KEY      = os.environ.get("FRED_API_KEY", "")
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+START_DATE        = "1990-01-01"
+CYCLE_COLORS      = ["#ff7b72", "#d2a8ff", "#79c0ff"]  # red / purple / blue
 
 DARK_LAYOUT = dict(
     plot_bgcolor  = "#161b22",
@@ -53,7 +59,7 @@ def fetch(series_id, start=START_DATE):
         return raw.resample("MS").mean().ffill().dropna()
     except Exception as exc:
         st.warning(f"Could not load **{series_id}**: {exc}")
-        return pd.Series(dtype=float, name=series_id)
+        return pd.Series(dtype=float, name=series_id, index=pd.DatetimeIndex([]))
 
 # ── Rate-cut cycle detection ──────────────────────────────────────────────────
 def find_cut_cycles(fedfunds, n=3):
@@ -86,18 +92,24 @@ def add_cut_overlays(fig, cut_dates, window_months=12,
             layer="below", line_width=0,
             **rc,
         )
-        vl_kwargs = dict(
+        fig.add_vline(
             x=x0_str,
             line=dict(color=color, width=1.5, dash="dash"),
+            **rc,
         )
         if annotate:
-            vl_kwargs.update(
-                annotation_text=f"Cut {i+1} ({dt.strftime('%b %Y')})",
-                annotation_font_color=color,
-                annotation_font_size=10,
-                annotation_position="top right",
+            xref = "x" if row is None else f"x{'' if row == 1 else row}"
+            fig.add_annotation(
+                x=x0_str,
+                y=1.0,
+                xref=xref,
+                yref="paper",
+                text=f"Cut {i+1} ({dt.strftime('%b %Y')})",
+                font=dict(color=color, size=10),
+                showarrow=False,
+                xanchor="left",
+                yanchor="top",
             )
-        fig.add_vline(**vl_kwargs, **rc)
 
 # ── Header ────────────────────────────────────────────────────────────────────
 st.title("Fed Surprise Dashboard — Rate Cut Analysis")
@@ -506,7 +518,7 @@ with tab6:
     )
 
     with st.spinner("Loading hedge asset data…"):
-        gold   = fetch("GOLDAMGBD228NLBM")  # Gold price USD/troy oz
+        gold   = fetch("GOLDPMGBD228NLBM")  # Gold Fixing Price 3:00 P.M. (London) USD/troy oz
         dollar = fetch("DTWEXBGS")          # Trade-weighted USD index (broad)
 
     fig6 = make_subplots(
@@ -517,8 +529,10 @@ with tab6:
 
     window_months = 18
     for col_idx, (asset_name, series) in enumerate(
-        [("Gold (GOLDAMGBD228NLBM)", gold), ("USD Index (DTWEXBGS)", dollar)], start=1
+        [("Gold (GOLDPMGBD228NLBM)", gold), ("USD Index (DTWEXBGS)", dollar)], start=1
     ):
+        if series.empty:
+            continue
         for i, dt in enumerate(cut_dates):
             color = CYCLE_COLORS[i % len(CYCLE_COLORS)]
             end_dt = dt + pd.DateOffset(months=window_months)

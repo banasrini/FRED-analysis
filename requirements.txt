@@ -3,3 +3,5 @@ fredapi
 plotly
 pandas
 numpy
+anthropic
+python-dotenv
